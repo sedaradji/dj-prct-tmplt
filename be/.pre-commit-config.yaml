@@ -1,0 +1,63 @@
+# Exclude migrations from all checks
+exclude: .*?/migrations/
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.4.0
+    hooks:
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-added-large-files
+
+  - repo: local
+    hooks:
+      - id: pip-compile
+        name: Compile requirements
+        entry: sh -c 'pip-compile requirements/prod.in && pip-compile requirements/dev.in && pip-compile requirements/prod.in --output-file requirements.txt'
+        language: system
+        files: ^requirements/(prod|dev)\.in$
+        pass_filenames: false
+
+      - id: black
+        name: black
+        entry: black
+        language: system
+        types: [python]
+        args: ["--config=pyproject.toml"]
+
+      - id: isort
+        name: isort
+        entry: isort
+        language: system
+        types: [python]
+        exclude: '^settings.*\.py$'
+        args: ["--settings-path=pyproject.toml"]
+
+      - id: flake8
+        name: flake8
+        entry: flake8
+        language: system
+        types: [python]
+        args: ["--max-line-length=100"]
+
+      - id: djlint
+        name: djlint
+        entry: djlint
+        language: system
+        types: [html]
+        args: ["--reformat", "--quiet"]
+
+      - id: compile-translation
+        name: Compile translation messages
+        entry: sh -c 'python manage.py makemessages -a && python manage.py compilemessages'
+        files: ^src/.*\.po$
+        language: system
+        pass_filenames: false
+
+      - id: django-check
+        name: Django project check
+        entry: sh -c 'python manage.py check && python manage.py makemigrations --check --dry-run'
+        language: system
+        pass_filenames: false
+        always_run: true

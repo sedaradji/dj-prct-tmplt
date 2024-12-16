@@ -1,0 +1,10 @@
+django
+djangorestframework
+dj-database-url
+python-decouple
+psycopg2-binary
+postgis
+django-storages
+boto3
+django-cors-headers
+gunicorn

@@ -1,0 +1,37 @@
+name: Deploy Static Files to S3
+
+on:
+  push:
+    branches:
+      - main  # or your default branch name
+  # Optionally allow manual triggers
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
+
+      - name: Build and run Docker image
+        env:
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+        run: |
+          docker build  --build-arg USE_S3=true --build-arg S3_BUCKET=${{ secrets.S3_BUCKET }} -t fe .
+          docker run \
+            -e AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }} \
+            -e AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }} \
+            -e AWS_DEFAULT_REGION=${{ secrets.AWS_DEFAULT_REGION }} \
+            -e S3_BUCKET=${{ secrets.S3_BUCKET }} \
+            -e USE_S3=true \
+            -e EXEC_ENV=PROD \
+            fe

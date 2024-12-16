@@ -1,0 +1,165 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Build and push Docker image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+          --build-arg SECRET_KEY="${{ secrets.SECRET_KEY }}" \
+          --build-arg DEBUG="False" \
+          --build-arg DOMAIN="${{ secrets.DOMAIN }}" \
+          --build-arg EXEC_ENV="PROD" \
+          --build-arg DB_NAME="${{ secrets.DB_NAME }}" \
+          --build-arg DB_USER="${{ secrets.DB_USER }}" \
+          --build-arg DB_PWD="${{ secrets.DB_PWD }}" \
+          --build-arg DB_HOST="${{ secrets.DB_HOST }}" \
+          --build-arg DB_PORT="${{ secrets.DB_PORT }}" \
+          --build-arg USE_S3="${{ secrets.USE_S3 }}" \
+          --build-arg AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY_ID }}" \
+          --build-arg AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
+          --build-arg AWS_STORAGE_BUCKET_NAME="${{ secrets.AWS_STORAGE_BUCKET_NAME }}" \
+          --build-arg AWS_S3_REGION_NAME="${{ secrets.AWS_S3_REGION_NAME }}" .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+    - name: Deploy to EC2
+      uses: appleboy/ssh-action@master
+      with:
+        host: ${{ secrets.EC2_HOST }}
+        username: ${{ secrets.EC2_USERNAME }}
+        key: ${{ secrets.EC2_SSH_KEY }}
+        script: |
+          # Install Nginx and Certbot if not already installed
+          if ! command -v nginx &> /dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y nginx certbot python3-certbot-nginx
+          fi
+
+          # Pull and run the Docker container
+          aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
+          docker pull ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:${{ github.sha }}
+
+          docker stop be || true
+          docker rm be || true
+
+          docker run -d \
+            --name be \
+            -p 8001:8000 \
+            --restart unless-stopped \
+            -e SECRET_KEY="${{ secrets.SECRET_KEY }}" \
+            -e DEBUG="${{ secrets.DEBUG }}" \
+            -e DOMAIN="${{ secrets.DOMAIN }}" \
+            -e EXEC_ENV="PROD" \
+            -e DB_NAME="${{ secrets.DB_NAME }}" \
+            -e DB_USER="${{ secrets.DB_USER }}" \
+            -e DB_PWD="${{ secrets.DB_PWD }}" \
+            -e DB_HOST="${{ secrets.DB_HOST }}" \
+            -e DB_PORT="${{ secrets.DB_PORT }}" \
+            -e USE_S3="${{ secrets.USE_S3 }}" \
+            -e AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY_ID }}" \
+            -e AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
+            -e AWS_STORAGE_BUCKET_NAME="${{ secrets.AWS_STORAGE_BUCKET_NAME }}" \
+            -e AWS_S3_REGION_NAME="${{ secrets.AWS_S3_REGION_NAME }}" \
+            ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:${{ github.sha }}
+
+          # Create Nginx configuration
+          sudo tee /etc/nginx/sites-available/be.conf > /dev/null << EOF
+          server {
+              listen 80;
+              listen [::]:80;
+              server_name ${{ secrets.DOMAIN }};
+
+              # Redirect all HTTP requests to HTTPS
+              location / {
+                  return 301 https://\$server_name\$request_uri;
+              }
+          }
+
+          server {
+              listen 443 ssl;
+              listen [::]:443 ssl;
+              server_name ${{ secrets.DOMAIN }};
+
+              # SSL configuration
+              ssl_certificate /etc/letsencrypt/live/${{ secrets.DOMAIN }}/fullchain.pem;
+              ssl_certificate_key /etc/letsencrypt/live/${{ secrets.DOMAIN }}/privkey.pem;
+              ssl_session_timeout 1d;
+              ssl_session_cache shared:SSL:50m;
+              ssl_session_tickets off;
+              ssl_protocols TLSv1.2 TLSv1.3;
+              ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
+              ssl_prefer_server_ciphers off;
+
+              # HSTS (uncomment if you're sure)
+              # add_header Strict-Transport-Security "max-age=63072000" always;
+
+              # Proxy settings
+              location / {
+                  proxy_pass http://localhost:8001;
+                  proxy_set_header Host \$host;
+                  proxy_set_header X-Real-IP \$remote_addr;
+                  proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto \$scheme;
+              }
+
+              # Static files
+              location /static/ {
+                  alias /var/www/be/static/;
+                  expires 30d;
+                  add_header Cache-Control "public, no-transform";
+              }
+
+              location /media/ {
+                  alias /var/www/be/media/;
+                  expires 30d;
+                  add_header Cache-Control "public, no-transform";
+              }
+          }
+          EOF
+
+          # Enable the site and remove default if exists
+          sudo rm -f /etc/nginx/sites-enabled/default
+          sudo ln -sf /etc/nginx/sites-available/be.conf /etc/nginx/sites-enabled/
+
+          # Create directories for static files
+          sudo mkdir -p /var/www/be/static
+          sudo mkdir -p /var/www/be/media
+          sudo chown -R www-data:www-data /var/www/be
+
+          # Test Nginx configuration
+          sudo nginx -t
+
+          # Obtain SSL certificate if not already present
+          if [ ! -d "/etc/letsencrypt/live/${{ secrets.DOMAIN }}" ]; then
+            sudo certbot --nginx -d ${{ secrets.DOMAIN }} --non-interactive --agree-tos -m ${{ secrets.EMAIL_ADDRESS }}
+          fi
+
+          # Reload Nginx
+          sudo systemctl reload nginx
+
+          # Run migrations
+          sleep 10
+          docker exec be python manage.py migrate --noinput

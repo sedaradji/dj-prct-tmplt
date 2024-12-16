@@ -1,0 +1,12 @@
+black
+isort
+flake8
+mypy
+django-stubs
+pylint
+pylint-django
+bandit
+safety
+pre-commit
+djlint
+pip-tools
